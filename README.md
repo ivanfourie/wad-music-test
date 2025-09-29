@@ -1,8 +1,8 @@
-# Doom WAD Music (Rust)
+# Doom WAD Music Test Utility written in Rust
 
-little Rust playground that can open a DOOM/Heretic/Strife WAD file, list its contents, and play back music (MUS/MIDI) using a General MIDI SoundFont.
+Little Rust playground that can open a DOOM/Heretic/Strife WAD file, list its contents, and play back music using a General MIDI SoundFont.
 
-⚠️ This is an experiment — it works, but it’s not polished.
+⚠️ This is an experiment - it works, but it’s not polished.
 
 ## Features
 
@@ -18,11 +18,11 @@ little Rust playground that can open a DOOM/Heretic/Strife WAD file, list its co
 
 ## What works
 
-* You can point it at a WAD (e.g. doom2.wad) and a SoundFont (.sf2) and:
-    1. List available songs.
-    2. Type the song name to play it.
-    3. Pause/resume with space, stop with Esc.
-    4. Play multiple songs in sequence without restarting.
+You can point it at a WAD (e.g. doom2.wad) and a SoundFont (.sf2) and:
+1. List available songs.
+2. Type the song name to play it.
+3. Pause/resume with space, stop with Esc.
+4. Play multiple songs in sequence without restarting.
 
 ## Usage
 ```bash
@@ -32,9 +32,9 @@ cargo run --release -- path/to/DOOM2.WAD path/to/soundfont.sf2
 ## Requirements
 
 * Rust 1.75+ (tested).
-* A WAD file (DOOM/DOOM2/Heretic/Strife). // Shareware works beautifully
+* A WAD file (DOOM/DOOM2/Heretic/Strife)
 * A General MIDI SoundFont (.sf2).
-  * Free ones that sounds great: [Arachno](href=http://www.arachnosoft.com/main/soundfont.php), [GeneralUser GS](https://schristiancollins.com/generaluser.php)
+  * Free ones that sound great: [Arachno](href=http://www.arachnosoft.com/main/soundfont.php), [GeneralUser GS](https://schristiancollins.com/generaluser.php)
 
 ## License
 MIT
