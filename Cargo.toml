@@ -1,0 +1,15 @@
+[package]
+name = "wad-music-test"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1"
+thiserror = "1"
+clap = { version = "4", features = ["derive"] }
+cpal = "0.15"
+byteorder = "1"
+midly = "0.5"
+tempfile = "3"
+fluidlite = { version = "0.2.1", features = ["bindgen"] }
+crossterm = "0.27"
