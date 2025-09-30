@@ -200,8 +200,8 @@ impl Audio {
                             Program(ch, prog)      => { let _ = s.program_change(ch as u32, prog as u32); }
                             Control(ch, cc, val)   => { let _ = s.cc(ch as u32, cc as u32, val as u32); }
                             PitchBend(ch, bend)  => { let _ = s.pitch_bend(ch as u32, bend as u32); }
-                            AfterTouch(_,_,_)      => {}
-                            ChannelAftertouch(_,_) => {}
+                            AfterTouch(ch, key, vel) => { let _ = s.key_pressure(ch as u32, key as u32, vel as u32); }
+                            ChannelAftertouch(ch, vel) => { let _ = s.channel_pressure(ch as u32, vel as u32); }
                             Tempo(_)               => {} // already baked into timeline
                         }
                     } else {

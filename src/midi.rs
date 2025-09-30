@@ -94,7 +94,7 @@ pub fn build_timeline(smf: &Smf<'_>) -> Timeline {
     }
 
     let mut events = Vec::new();
-    let mut counts = [0usize; 16];
+
     // Walk each track independently
     for tr in &smf.tracks {
         let mut abs_ticks: u64 = 0;
@@ -123,7 +123,6 @@ pub fn build_timeline(smf: &Smf<'_>) -> Timeline {
                         // NoteOn with velocity=0 is equivalent to NoteOff
                         NoteOn { key, vel } if vel.as_int() == 0 => {
                             events.push(Timed { t_us, msg: Msg::NoteOff(ch, key.as_int(), 0) });
-                            if vel.as_int() > 0 { counts[u8::from(channel) as usize] += 1; }
                         }
                         NoteOn { key, vel } => {
                             events.push(Timed { t_us, msg: Msg::NoteOn(ch, key.as_int(), vel.as_int()) });
@@ -152,7 +151,6 @@ pub fn build_timeline(smf: &Smf<'_>) -> Timeline {
                 _ => {}
             }
         }
-        eprintln!("NoteOn counts per MIDI ch: {:?}", counts);
     }
 
     // Merge all tracks into a single sorted timeline
