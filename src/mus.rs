@@ -32,8 +32,8 @@ pub fn mus_to_smf(mus: &[u8]) -> Result<Smf<'static>> {
         kind: TrackEventKind::Meta(MetaMessage::Tempo(u24::from(1_000_000))),
     });
 
-    // Per-channel remembered velocity
-    let mut last_vel = [100u8; 16];
+    // Per-channel remembered velocity (DoomGeneric uses 127)
+    let mut last_vel = [127u8; 16];
 
     let mut i = 0usize;
     let mut pending_delta: u32 = 0;
@@ -53,7 +53,7 @@ pub fn mus_to_smf(mus: &[u8]) -> Result<Smf<'static>> {
         match ty {
             0 => { // Release note
                 if i >= stream.len() { break; }
-                let key = stream[i]; i += 1;
+                let key = stream[i] & 0x7F; i += 1;
                 push(&mut track, pending_delta, TrackEventKind::Midi {
                     channel: ch,
                     message: MidiMessage::NoteOff { key: key.into(), vel: 0.into() }
@@ -72,6 +72,8 @@ pub fn mus_to_smf(mus: &[u8]) -> Result<Smf<'static>> {
                     vel = stream[i]; i += 1;
                     last_vel[ch_mus as usize] = vel;
                 }
+                // Clamp velocity to 127 (0x7F)
+                vel = vel.min(127);
 
                 push(&mut track, pending_delta, TrackEventKind::Midi {
                     channel: ch,
@@ -81,10 +83,11 @@ pub fn mus_to_smf(mus: &[u8]) -> Result<Smf<'static>> {
             }
             2 => { // Pitch wheel (7-bit, centered at 64)
                 if i >= stream.len() { break; }
-                let v = stream[i] as i16; i += 1;
-                let centered = v - 64;                 // -64..63
-                let bend_u = (8192 + centered as i32 * 128).clamp(0, 16383) as u16;
-                let bend = u14::from(bend_u);
+                let v = stream[i] as i32; i += 1;        // 0..255, center 128
+                let centered = v - 128;                  // -128..+127
+                let bend14 = (8192 + centered * 64)      // scale so ±128 → ≈ ±8192
+                    .clamp(0, 16383) as u16;
+                let bend = midly::num::u14::from(bend14);
                 push(&mut track, pending_delta, TrackEventKind::Midi {
                     channel: ch,
                     message: MidiMessage::PitchBend { bend: midly::PitchBend(bend) }
@@ -93,7 +96,7 @@ pub fn mus_to_smf(mus: &[u8]) -> Result<Smf<'static>> {
             }
             3 => {
                 // System event: one data byte follows. We don't use it for GM, but we MUST consume it.
-                // eprintln!("MUS System event at offset {}", i - 1);
+                //eprintln!("MUS System event at offset {}", i - 1);
                 if i >= stream.len() { break; }
                 let _sys = stream[i]; // values are DMX-internal (e.g. score markers), ignore for playback
                 i += 1;
@@ -128,6 +131,9 @@ pub fn mus_to_smf(mus: &[u8]) -> Result<Smf<'static>> {
                 }
                 pending_delta = 0;
             }
+            5 => {
+                // end of measure, no pauload */
+            }
             6 => { // End of score
                 // eprintln!("MUS end at offset {}", i - 1);
                 break;
@@ -136,7 +142,7 @@ pub fn mus_to_smf(mus: &[u8]) -> Result<Smf<'static>> {
                 if i >= stream.len() { break; }
                 let _ignored = stream[i]; i += 1;
             }
-                        _ => {
+            _ => {
                 // Unknown type. You can choose to bail or skip.
             }
         }
@@ -172,7 +178,11 @@ fn read_var_time(bytes: &[u8]) -> (u32, usize) {
 
 fn map_channel(ch_mus: u8) -> u8 {
     // MUS channel 15 is drums. Map to GM channel 9.
-    if ch_mus == 15 { 9 } else { ch_mus }
+    match ch_mus {
+        15 => 9,                // drums
+        c if c >= 9 => c+1, // 9..14 -> 10..15
+        c => c,
+    }
 }
 
 fn map_controller(c: u8) -> Option<u8> {
@@ -190,4 +200,39 @@ fn map_controller(c: u8) -> Option<u8> {
         11 => 123, // all notes off
         _  => return None,
     })
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use midly::{TrackEventKind, MidiMessage};
+
+    #[test]
+    fn test_valid_mus_to_midi_conversion() {
+        // Minimal valid MUS lump: header + one note on + end
+        // Header: "MUS\x1A", score_len, score_start, rest zero
+        // Score: Play note event (type=1, ch=0), key=60; End of score (type=6)
+        // Layout: [header (16 bytes)][score (3 bytes)]
+        let score_start = 16u16;
+        let score = [0x10, 60, 0x60]; // Play note, key=60; End of score
+        let score_len = score.len() as u16;
+
+        let mut mus = vec![
+            b'M', b'U', b'S', 0x1A, // magic
+            score_len as u8, (score_len >> 8) as u8, // score_len (LE)
+            score_start as u8, (score_start >> 8) as u8, // score_start (LE)
+        ];
+        mus.extend_from_slice(&[0; 8]); // pad header to 16 bytes
+        mus.extend_from_slice(&score); // score at offset 16
+
+        let smf = mus_to_smf(&mus).expect("Should convert valid MUS lump");
+        assert_eq!(smf.header.format, midly::Format::SingleTrack);
+        assert_eq!(smf.tracks.len(), 1);
+        let events = &smf.tracks[0];
+        // Should contain at least: Tempo, NoteOn, EndOfTrack
+        assert!(events.iter().any(|e| matches!(e.kind, TrackEventKind::Meta(_))));
+        assert!(events.iter().any(|e| matches!(e.kind, TrackEventKind::Midi { message: MidiMessage::NoteOn { .. }, .. })));
+        assert!(events.iter().any(|e| matches!(e.kind, TrackEventKind::Meta(midly::MetaMessage::EndOfTrack))));
+    }
 }

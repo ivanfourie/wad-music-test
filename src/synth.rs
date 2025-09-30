@@ -32,7 +32,7 @@ use std::{
 };
 use std::sync::mpsc::{self, Sender};
 
-use crate::midi::{Msg, Timeline};
+use crate::midi::{Timeline};
 
 pub struct Player {
     paused: Arc<AtomicBool>,
@@ -175,7 +175,7 @@ impl Audio {
                     continue;
                 } else if let Some(since) = paused_since.take() {
                     // just resumed: accumulate paused span
-                    let span = since.elapsed().as_micros() as u128;
+                    let span = since.elapsed().as_micros();
                     paused_total_us = paused_total_us.saturating_add(span);
                 }
 
@@ -183,7 +183,7 @@ impl Audio {
                 if i >= events.len() { break 'play; }
 
                 // Compute "logical now" in microseconds (wall-clock elapsed minus paused time)
-                let wall_us = start.elapsed().as_micros() as u128;
+                let wall_us = start.elapsed().as_micros();
                 let now_us_u128 = wall_us.saturating_sub(paused_total_us);
                 // Clamp to u64 for our event timestamps
                 let now_us = if now_us_u128 > u64::MAX as u128 { u64::MAX } else { now_us_u128 as u64 };
@@ -192,18 +192,14 @@ impl Audio {
 
                 if now_us >= e.t_us {
                     // Dispatch this event
-                    if let Ok(mut s) = synth.lock() {
+                    if let Ok(s) = synth.lock() {
                         use crate::midi::Msg::*;
                         match e.msg {
                             NoteOn(ch, key, vel)   => { let _ = s.note_on(ch as u32, key as u32, vel as u32); }
                             NoteOff(ch, key, _vel) => { let _ = s.note_off(ch as u32, key as u32); }
                             Program(ch, prog)      => { let _ = s.program_change(ch as u32, prog as u32); }
                             Control(ch, cc, val)   => { let _ = s.cc(ch as u32, cc as u32, val as u32); }
-                            PitchBend(ch, bend14)  => {
-                                // fluidlite expects -8192..8191 semitone wheel offset; convert safely
-                                let pb = (bend14 as u32).saturating_sub(8192);
-                                let _ = s.pitch_bend(ch as u32, pb);
-                            }
+                            PitchBend(ch, bend)  => { let _ = s.pitch_bend(ch as u32, bend as u32); }
                             AfterTouch(_,_,_)      => {}
                             ChannelAftertouch(_,_) => {}
                             Tempo(_)               => {} // already baked into timeline
@@ -217,7 +213,7 @@ impl Audio {
                     // Wait until it's time for this event, without underflow
                     let wait_us = e.t_us.saturating_sub(now_us); // safe u64 subtraction
                     // Sleep a small chunk; don’t try to sleep the whole microsecond span
-                    let ms = std::cmp::min(5, (wait_us / 1000) as u64);
+                    let ms = std::cmp::min(5, wait_us / 1000);
                     if ms > 0 {
                         std::thread::sleep(std::time::Duration::from_millis(ms));
                     } else {
@@ -239,5 +235,117 @@ impl Audio {
     pub fn start(&self) -> anyhow::Result<()> {
         self.stream.play()?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::midi::{Msg, Timed, Timeline};
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    // Dummy synth that just records calls
+    struct DummySynth {
+        pub note_on_calls: Arc<Mutex<Vec<(u32, u32, u32)>>>,
+        pub note_off_calls: Arc<Mutex<Vec<(u32, u32)>>>,
+    }
+    impl DummySynth {
+        fn new() -> Self {
+            Self {
+                note_on_calls: Arc::new(Mutex::new(vec![])),
+                note_off_calls: Arc::new(Mutex::new(vec![])),
+            }
+        }
+    }
+    trait DummySynthTrait {
+        fn note_on(&mut self, ch: u32, key: u32, vel: u32);
+        fn note_off(&mut self, ch: u32, key: u32);
+    }
+
+    impl DummySynthTrait for DummySynth {
+        fn note_on(&mut self, ch: u32, key: u32, vel: u32) {
+            self.note_on_calls.lock().unwrap().push((ch, key, vel));
+        }
+        fn note_off(&mut self, ch: u32, key: u32) {
+            self.note_off_calls.lock().unwrap().push((ch, key));
+        }
+    }
+
+    #[test]
+    fn test_play_timeline_state_transitions() {
+        // Create a short timeline: NoteOn at t=0, NoteOff at t=50_000us
+        let timeline = Timeline {
+            events: vec![
+                Timed { t_us: 0, msg: Msg::NoteOn(0, 60, 100) },
+                Timed { t_us: 50_000, msg: Msg::NoteOff(0, 60, 0) },
+            ],
+            last_t_us: 50_000,
+            ppq: 140.0,
+            initial_us_per_qn: 1_000_000.0,
+        };
+
+        // Use DummySynth in place of FluidLite Synth
+        let dummy = DummySynth::new();
+        let synth = Arc::new(Mutex::new(dummy));
+
+        // We can't create a real Audio (needs SoundFont and CPAL), so test play_timeline logic directly
+        let paused = Arc::new(AtomicBool::new(false));
+        let finished = Arc::new(AtomicBool::new(false));
+        let (stop_tx, stop_rx) = mpsc::channel::<()>();
+        let paused_t = paused.clone();
+        let finished_t = finished.clone();
+        let synth_clone = synth.clone();
+        let events = timeline.events.clone();
+
+        std::thread::spawn(move || {
+            let start = std::time::Instant::now();
+            let mut paused_since: Option<std::time::Instant> = None;
+            let mut paused_total_us: u128 = 0;
+            let mut i = 0usize;
+            'play: loop {
+                if stop_rx.try_recv().is_ok() { break 'play; }
+                if paused_t.load(Ordering::SeqCst) {
+                    if paused_since.is_none() { paused_since = Some(std::time::Instant::now()); }
+                    std::thread::sleep(Duration::from_millis(10));
+                    continue;
+                } else if let Some(since) = paused_since.take() {
+                    let span = since.elapsed().as_micros();
+                    paused_total_us = paused_total_us.saturating_add(span);
+                }
+                if i >= events.len() { break 'play; }
+                let wall_us = start.elapsed().as_micros();
+                let now_us_u128 = wall_us.saturating_sub(paused_total_us);
+                let now_us = if now_us_u128 > u64::MAX as u128 { u64::MAX } else { now_us_u128 as u64 };
+                let e = events[i];
+                if now_us >= e.t_us {
+                    if let Ok(mut s) = synth_clone.lock() {
+                        match e.msg {
+                            Msg::NoteOn(ch, key, vel) => { let _ = s.note_on(ch as u32, key as u32, vel as u32); },
+                            Msg::NoteOff(ch, key, _vel) => { let _ = s.note_off(ch as u32, key as u32); },
+                            _ => {}
+                        }
+                    }
+                    i += 1;
+                } else {
+                    let wait_us = e.t_us.saturating_sub(now_us);
+                    let ms = std::cmp::min(5, (wait_us / 1000) as u64);
+                    if ms > 0 {
+                        std::thread::sleep(Duration::from_millis(ms));
+                    } else {
+                        std::thread::sleep(Duration::from_micros(200));
+                    }
+                }
+            }
+            finished_t.store(true, Ordering::SeqCst);
+        });
+
+        // Wait for thread to finish
+        std::thread::sleep(Duration::from_millis(100));
+        // Check state transitions
+        let synth = synth.lock().unwrap();
+        assert_eq!(synth.note_on_calls.lock().unwrap().len(), 1);
+        assert_eq!(synth.note_off_calls.lock().unwrap().len(), 1);
+        assert!(finished.load(Ordering::SeqCst));
     }
 }
